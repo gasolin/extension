@@ -1,3 +1,6 @@
+import TransportWebUSB from "@ledgerhq/hw-transport-webusb"
+import Eth from "@ledgerhq/hw-app-eth"
+import Error from "@ledgerhq/errors"
 import { SignedEVMTransaction } from "../../networks"
 import { HexString } from "../../types"
 import BaseService from "../base"
@@ -9,9 +12,16 @@ enum LedgerType {
   LEDGER_NANO_X,
 }
 
+// 0x1011 - LEDGER_NANO_S_DASHBOARD
+// 0x1015 - LEDGER_NANO_S_ETH_APP
+
+const SupportedLedgerPids = {
+  0x1011: LedgerType.LEDGER_NANO_S, // DASHBOARD
+  0x1015: LedgerType.LEDGER_NANO_S, // ETHEREUM APP
+}
+
 type MetaData = {
-  deviceVersion: string
-  ethereumDAppVersion: string
+  ethereumVersion: string
 }
 
 type Events = ServiceLifecycleEvents & {
@@ -42,24 +52,73 @@ type Events = ServiceLifecycleEvents & {
  * - xxx
  */
 export default class LedgerService extends BaseService<Events> {
+  knownLedgerInstances: Array<string>
+
   static create: ServiceCreatorFunction<
     Events,
     LedgerService,
     [] // we don't know our final dependencies
   > = async () => {
+    logger.info("LedgerService::create")
     return new this()
   }
 
   private constructor() {
     super()
+    this.knownLedgerInstances = ["unrecognizable"]
+    logger.info("LedgerService::constructor")
+  }
+
+  private async generateLedgerId(
+    event: USBConnectionEvent
+  ): Promise<[string, LedgerType]> {
+    return [this.knownLedgerInstances[0], LedgerType.LEDGER_NANO_S]
   }
 
   protected async internalStartService(): Promise<void> {
     await super.internalStartService() // Not needed, but better to stick to the patterns
 
-    // this.emitter.emit(
-    //   "initializeAllowedPages",
-    //   await this.db.getAllPermission()
-    // )
+    logger.info("LedgerService::internalStartService")
+
+    navigator.usb.addEventListener(
+      "connect",
+      async (event: USBConnectionEvent) => {
+        // how to make it removable?
+        if (
+          Object.keys(SupportedLedgerPids).includes(
+            String(event.device.productId)
+          )
+        ) {
+          const transport = await TransportWebUSB.create()
+
+          logger.info("Handled & authorized device connected!")
+          const [id, type] = await this.generateLedgerId(event)
+
+          this.emitter.emit("connected", { id, type })
+          if (id === this.knownLedgerInstances[0]) {
+            logger.info("This Ledger does not run the Ethereum app currently!")
+            try {
+              // openApp(transport, "Ethereum"); // <- Shall we do that? If user does it, it will result in another call in this handler!
+            } catch (err) {
+              // if (err.name === "TransportOpenUserCancelled") // <- how to handle this specific case?
+            } finally {
+              if (transport) await transport.close()
+            }
+          } else {
+            const ethereumAppHandle = new Eth(transport)
+            const conf = await ethereumAppHandle.getAppConfiguration()
+            this.emitter.emit("ledgerAdded", {
+              id,
+              type,
+              accountIDs: [],
+              metadata: { ethereumVersion: conf.version },
+            })
+          }
+        } else {
+          logger.info("Unknown dev")
+        }
+        // navigator.usb.removeEventListener('connect', transient_cb); // how?
+      }
+    )
   }
 }
